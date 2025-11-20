@@ -1,3 +1,7 @@
+import ReactiveMP: is_predefined_node
+
+is_predefined_node(::Type{<:MatrixNormalWishart}) = PredefinedNodeFunctionalForm()
+
 
 @node MatrixNormalWishart Stochastic [out, M,Λ,Ω,ν]
 

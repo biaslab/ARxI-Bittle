@@ -1,5 +1,8 @@
+import ReactiveMP: is_predefined_node
 
 struct MARX end
+
+is_predefined_node(::Type{<:MARX}) = PredefinedNodeFunctionalForm()
 
 @node MARX Stochastic [out, outprev1, outprev2, in, inprev1, inprev2, Φ]
 
