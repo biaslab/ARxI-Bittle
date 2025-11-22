@@ -30,7 +30,7 @@ end
 
 function proj2psd(S::AbstractMatrix)
     L,V = eigen(S)
-    S = V*diagm(max.(1e-8,L))*V'
+    S = V*diagm(max.(1e-8,real(L)))*V'
     return (S+S')/2
 end
 

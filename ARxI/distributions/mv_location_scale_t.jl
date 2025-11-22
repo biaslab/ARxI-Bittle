@@ -97,7 +97,7 @@ function BayesBase.prod(::BayesBase.ClosedProd, left::MvLocationScaleT, right::u
     results = optimize(Q, gradQ, mean(left), LBFGS(), opts)
     y_map = Optim.minimizer(results)
     P_lap = ForwardDiff.hessian(Q,y_map)
-    P_lap = proj2psd(P_lap);
+    P_lap = real(proj2psd(P_lap));
     # @info "Done."
 
     # @info "y_map = ", y_map

@@ -1,16 +1,16 @@
 using Revise
+using Logging; Logging.LogLevel(-1000)
 using LinearAlgebra
 using Distributions
-using Logging; Logging.LogLevel(-1000)
+using Optim
+using ForwardDiff
 using RxInfer
-
 import GraphPPL: interfaces
 
 includet("src/util.jl");
 includet("distributions/matrix_normal_wishart.jl");
 includet("distributions/unboltzmann.jl");
 includet("distributions/mv_location_scale_t.jl");
-includet("distributions/mv_normal_mean_precision.jl")
 includet("nodes/MARX.jl");
 includet("nodes/matrix_normal_wishart.jl");
 includet("rules/MARX/in.jl");
@@ -36,8 +36,8 @@ end
     Θ   ~ MatrixNormalWishart(M_k,Λ_k,Ω_k,ν_k)
 
     # Action priors
-    u_[1] ~ MvNormalMeanPrecision(zeros(2),Υ)
-    u_[2] ~ MvNormalMeanPrecision(zeros(2),Υ)
+    u_[1] ~ MvNormalMeanPrecision(zeros(Du),Υ)
+    u_[2] ~ MvNormalMeanPrecision(zeros(Du),Υ)
 
     # MARX likelihood for t = 1,2
     y_[1] ~ MARX(y_tmin1,y_tmin2,u_[1],u_tmin1,u_tmin2,Θ)
@@ -45,7 +45,7 @@ end
 
     for t = 3:len_horizon
 
-        u_[t] ~ MvNormalMeanPrecision(zeros(2),Υ)
+        u_[t] ~ MvNormalMeanPrecision(zeros(Du),Υ)
         y_[t] ~ MARX(y_[t-1],y_[t-2],u_[t],u_[t-1],u_[t-2],Θ)
 
     end
@@ -76,16 +76,15 @@ function crossentropy(m_star, S_star, η,μ,Σ)
 end 
 
 # Parameters
-len_horizon = 3;
 Mu = 2
 My = 2
-Dy = 2
-Du = Dy
+Dy = 6
+Du = 8
 Dx = My*Dy + (Mu+1)*Du
-Dz = 4
 
 # Limits of controller
 global u_lims = (-20.0, 20.0)
+
 function infer_params(new_y,
                       ybuffer1,
                       ybuffer2,
@@ -97,13 +96,10 @@ function infer_params(new_y,
                       Ω_kmin1,
                       ν_kmin1)
 
-    M_kmin1 = cat(M_kmin1...,dims=2)
-    Λ_kmin1 = cat(Λ_kmin1...,dims=2)
     Ω_kmin1 = cat(Ω_kmin1...,dims=2)
-
+    Λ_kmin1 = cat(Λ_kmin1...,dims=2)
+    M_kmin1 = cat(M_kmin1...,dims=2)
     M_kmin1 = Matrix(M_kmin1')
-    
-    @info "Starting infer_params with new_y = $new_y"
 
     res = infer(
         model = learning(M_kmin1 = M_kmin1,
@@ -124,42 +120,64 @@ function infer_params(new_y,
     return params(res.posteriors[:Θ])
 end
 
-# function infer_action(ybuffer, ubuffer; num_iters=10)
+function infer_actions(ybuffer1,
+                       ybuffer2, 
+                       ubuffer1,
+                       ubuffer2,
+                       M_k,
+                       Λ_k,
+                       Ω_k,
+                       ν_k,
+                       Υ,
+                       m_star,
+                       S_star, 
+                       len_horizon;
+                       num_iters=10)
 
-    # inits = @initialization begin
-    #     q(Θ)  = results_learning.posteriors[:Θ]
-    #     q(y_) = vague(MvNormalMeanCovariance,Dy)
-    #     q(u_) = vague(MvNormalMeanCovariance,Du)
-    # end
+    # Reconstruct matrices passed from Python nested lists
+    S_star = cat(S_star...,dims=2)                      
+    Υ      = cat(Υ...,dims=2)
+    Ω_k    = cat(Ω_k...,dims=2)
+    Λ_k    = cat(Λ_k...,dims=2)
+    M_k    = cat(M_k...,dims=2)
+    M_k    = Matrix(M_k')
+    ν_k    = convert(Float64,ν_k)
 
-    # cons = @constraints begin
-    #     q(y_,u_,Θ) = q(y_)q(u_)q(Θ)
-    #     q(y_) = q(y_[begin])..q(y_[end])
-    #     q(u_) = q(u_[begin])..q(u_[end])
-    #     q(u_) :: PointMassFormConstraint()
-    # end
+    inits = @initialization begin
+        q(Θ)  = MatrixNormalWishart(M_k,Λ_k,Ω_k,ν_k)
+        q(y_) = vague(MvNormalMeanCovariance,Dy)
+        q(u_) = vague(MvNormalMeanCovariance,Du)
+    end
 
-#     # Feed updated beliefs, goal prior params and buffers to planning model
-#     results_planning = infer(
-#         model = planning(M_k         = M_k,
-#                               Λ_k         = Λs[:,:,k],
-#                               Ω_k         = Ωs[:,:,k],
-#                               ν_k         = νs[k],
-#                               Υ           = Υ,
-#                               m_star      = m_star, 
-#                               S_star      = S_star,
-#                               len_horizon = len_horizon,),
-#         data = (y_tmin1 = ybuffer[:,1],
-#                 y_tmin2 = ybuffer[:,2],
-#                 u_tmin1 = ubuffer[:,1],
-#                 u_tmin2 = ubuffer[:,2],),
-#         initialization = inits,
-#         constraints = cons,
-#         iterations = num_iters, 
-#         options = (limit_stack_depth=100,),
-#         returnvars = (u_ = KeepLast(),),
-#     )
+    @info "defined initialization"
 
-#     return mode(results_planning.posteriors[:u_][end][1])
-# end
+    cons = @constraints begin
+        q(y_,u_,Θ) = q(y_)q(u_)q(Θ)
+        q(y_) = q(y_[begin])..q(y_[end])
+        q(u_) = q(u_[begin])..q(u_[end])
+        q(u_) :: PointMassFormConstraint()
+    end
+
+    res = infer(
+        model = planning(M_k         = M_k,
+                        Λ_k         = Λ_k,
+                        Ω_k         = Ω_k,
+                        ν_k         = ν_k,
+                        Υ           = Υ,
+                        m_star      = m_star, 
+                        S_star      = S_star,
+                        len_horizon = len_horizon,),
+        data = (y_tmin1 = ybuffer1,
+                y_tmin2 = ybuffer2,
+                u_tmin1 = ubuffer1,
+                u_tmin2 = ubuffer2,),
+        initialization  = inits,
+        constraints     = cons,
+        iterations      = num_iters, 
+        options         = (limit_stack_depth=100,),
+        returnvars      = (u_ = KeepLast(),),
+    )
+
+    return mode.(res.posteriors[:u_])
+end
 

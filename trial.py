@@ -71,7 +71,7 @@ if __name__ == '__main__':
 
     # Time
     len_trial = 20
-    len_horizon = 3;
+    len_horizon = 5;
     now = dtime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
 
     # Dimensionalities
@@ -82,16 +82,17 @@ if __name__ == '__main__':
     Dx = My*Dy + (Mu+1)*Du
 
     # Prior parameters
-    Nu0     = 20.
+    Nu0     = 100.
     Omega0  = 1e0*np.diag(np.ones(Dy))
     Lambda0 = 1e-3*np.diag(np.ones(Dx))
     Mean0   = 1e-8*rnd.randn(Dx,Dy)
     Upsilon = 1e-4*np.diag(np.ones(Du))
 
     # Setpoint (desired observation)
-    m_star = [0.0, -10., 0.0, 0.0, 0.0, 0.0] # [yaw, pitch, roll, p_x, p_y, p_z]
-    v_star = [1e0, 1e-5, 1e0, 1e3, 1e3, 1e3]
-    goal   = multivariate_normal(m_star, np.diag(v_star))
+    m_star = np.array([0.0, -10., 0.0, 0.0, 0.0, 0.0]) # [yaw, pitch, roll, p_x, p_y, p_z]
+    v_star = np.array([1e0, 1e-5, 1e0, 1e3, 1e3, 1e3])
+    S_star = np.diag(v_star)
+    goal   = multivariate_normal(m_star, S_star)
 
     # Control limits
     u_lims = (-20,20)
@@ -114,7 +115,6 @@ if __name__ == '__main__':
     ub = np.zeros((Du,Mu+1))
 
     y_ = rnd.randn(Dy,len_trial)
-    u_ = np.round(rnd.randn(Du,len_trial))
 
     IMUstate = np.zeros((9))
 
@@ -129,8 +129,8 @@ if __name__ == '__main__':
         times[0] = timeit.default_timer()
         for k in range(1,len_trial):
             times[k] = timeit.default_timer()
-            logger.info(f"tstep = {k}/{len_trial}")
             dt = times[k] - times[k-1]
+            logger.info(f"tstep = {k}/{len_trial}, time = {times[k]}")
 
             "Interact with environment"
 
@@ -156,7 +156,7 @@ if __name__ == '__main__':
                     
             "Update parameters"
 
-            call = f"""
+            params = jl.eval(f"""
                 infer_params({y_[:,k].tolist()},
                              {yb[:,0].tolist()},
                              {yb[:,1].tolist()},
@@ -167,19 +167,39 @@ if __name__ == '__main__':
                              {Lambdas[:,:,k-1].tolist()},
                              {Omegas[:,:,k-1].tolist()},
                              {Nus[k-1].tolist()})
-            """
-            params = jl.eval(call)
+            """)
+
+            Means[:,:,k]   = params[0]
+            Lambdas[:,:,k] = params[1]
+            Omegas[:,:,k]  = params[2]
+            Nus[k]         = params[3]
+
+            # Update buffer
+            yb = backshift(yb,y_[:,k])
 
             "Plan actions"
 
             ##
+            policy = jl.eval(f"""
+               infer_actions({yb[:,0].tolist()},
+                             {yb[:,1].tolist()},
+                             {ub[:,0].tolist()},
+                             {ub[:,1].tolist()},
+                             {Means[:,:,k].tolist()},
+                             {Lambdas[:,:,k].tolist()},
+                             {Omegas[:,:,k].tolist()},
+                             {Nus[k].tolist()},
+                             {Upsilon.tolist()},
+                             {m_star.tolist()},
+                             {S_star.tolist()},
+                             {len_horizon})         
+            """)
 
-            # # Impose safety constraints
-            # u_[:,k] = np.clip(policy, a_min=u_lims[0], a_max=u_lims[1]).astype(int)
-            # logger.info(u_[:,k])
+            # Impose safety constraints
+            u_[:,k] = np.clip(policy[0], a_min=u_lims[0], a_max=u_lims[1]).astype(int)
+            logger.info(u_[:,k])
 
-            # Update buffer
-            yb = backshift(yb,y_[:,k])
+            # Update buffer            
             ub = backshift(ub,u_[:,k])
             
 
@@ -187,7 +207,8 @@ if __name__ == '__main__':
         logger.info("Ports closed.")
 
         print("Saving results..")
-        # np.save("results/trials/agent-ARxI-" + now + "-times.npy", times)
+        np.save("results/trials/agent-ARxI-" + now + "-times.npy", times)
+        np.save("results/trials/agent-ARxI-" + now + "-actions.npy", u_)
         print("Experiment completed.")
 
     except Exception as e:
