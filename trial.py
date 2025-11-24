@@ -9,7 +9,7 @@ import numpy as np
 import numpy.random as rnd
 import timeit
 from scipy.stats import multivariate_normal
-from scipy.linalg import inv,det
+from scipy.linalg import inv, det, solve, cho_factor, cho_solve
 from scipy.optimize import minimize
 
 from julia import Julia
@@ -55,8 +55,18 @@ def acc2pos(acc, prev_state, dt=1.0, reg=1e-3):
     state_pred_S = A @ prev_state.cov @ A.T + Q
 
     # Correction step
-    Is      = C @ state_pred_S @ C.T + R
-    Kg      = state_pred_S @ C.T @ inv(Is)
+    Is = C @ state_pred_S @ C.T + R  # Innovation covariance (S)
+    # Numerically stable Kalman gain computation avoiding explicit matrix inverse.
+    # K = P H^T S^{-1}. Prefer Cholesky factorization since S should be symmetric positive definite.
+    try:
+        cF = cho_factor(Is, overwrite_a=False, check_finite=False)
+        # cho_solve(cF, I) yields S^{-1} without forming an explicit inverse via Gaussian elimination.
+        Sinv = cho_solve(cF, np.eye(Is.shape[0]))
+        Kg = state_pred_S @ C.T @ Sinv
+    except np.linalg.LinAlgError:
+        # Fallback: solve linear system S^T Z = (P H^T)^T, then K = Z^T
+        PHT = state_pred_S @ C.T
+        Kg = solve(Is, PHT.T, assume_a='pos', check_finite=False).T
     state_m = state_pred_m + Kg @ (acc - C @ state_pred_m)
     state_S = (np.eye(9) - Kg @ C) @ state_pred_S + reg*np.eye(9)
 
@@ -70,8 +80,8 @@ def backshift(B,v):
 if __name__ == '__main__':
 
     # Time
-    len_trial = 20
-    len_horizon = 5;
+    len_trial = 50
+    len_horizon = 3;
     now = dtime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
 
     # Dimensionalities
@@ -114,16 +124,19 @@ if __name__ == '__main__':
     yb = np.zeros((Dy,My))
     ub = np.zeros((Du,Mu+1))
 
-    y_ = rnd.randn(Dy,len_trial)
+    # Test controls
+    pos0 = np.zeros(16)
+    pos1 = np.array([8, 0, 12, 0, 9, 0, 13, 0, 11, 0, 15, 0, 10, 0, 14, 0])
+    u_   = np.tile(np.column_stack((pos0,pos1)), (1,round(len_trial/2)))
 
-    IMUstate = np.zeros((9))
+    IMUstate = multivariate_normal(np.zeros((9)),np.eye(9))
 
     goodPorts = {}
     try:
 
-        # connectPort(goodPorts)    
-        # send(goodPorts, ['B', 0.0])
-        # send(goodPorts, ['I', [8, 0, 12, 0, 9, 0, 13, 0, 11, 0, 15, 0, 10, 0, 14, 0], 0.0])
+        connectPort(goodPorts)    
+        send(goodPorts, ['B', 0.0])
+        send(goodPorts, ['I', [8, 0, 12, 0, 9, 0, 13, 0, 11, 0, 15, 0, 10, 0, 14, 0], 0.0])
 
         # Start the stopwatch
         times[0] = timeit.default_timer()
@@ -143,16 +156,13 @@ if __name__ == '__main__':
                        15, u_[5,k-1].astype(int),
                        10, u_[6,k-1].astype(int),
                        14, u_[7,k-1].astype(int)]
-            # send(goodPorts, ['I', actions, 0.0])
+            send(goodPorts, ['I', actions, 0.0])
         
             # Read IMU
-            # ypracc = send(goodPorts, ['v', 0])
-            # ypracc = np.array(ypracc[1].split()[-6:],dtype='float64')
-            # IMUstate = acc2pos(ypracc[-3:]/1e3, IMUstate, dt=dt, reg=np.maximum(1e-3,10*dt))
-            # y_[:,k] = np.concatenate([ypracc[:3],IMUstate[:3]])
-
-            # Update ybuffer
-            
+            ypracc = send(goodPorts, ['v', 0])
+            ypracc = np.array(ypracc[1].split()[-6:],dtype='float64')
+            IMUstate = acc2pos(ypracc[-3:]/1e3, IMUstate, dt=dt, reg=np.maximum(1e-3,10*dt))
+            y_[:,k] = np.concatenate([ypracc[:3],IMUstate.mean[:3]])
                     
             "Update parameters"
 
@@ -180,27 +190,27 @@ if __name__ == '__main__':
             "Plan actions"
 
             ##
-            policy = jl.eval(f"""
-               infer_actions({yb[:,0].tolist()},
-                             {yb[:,1].tolist()},
-                             {ub[:,0].tolist()},
-                             {ub[:,1].tolist()},
-                             {Means[:,:,k].tolist()},
-                             {Lambdas[:,:,k].tolist()},
-                             {Omegas[:,:,k].tolist()},
-                             {Nus[k].tolist()},
-                             {Upsilon.tolist()},
-                             {m_star.tolist()},
-                             {S_star.tolist()},
-                             {len_horizon})         
-            """)
+            # policy = jl.eval(f"""
+            #    infer_actions({yb[:,0].tolist()},
+            #                  {yb[:,1].tolist()},
+            #                  {ub[:,0].tolist()},
+            #                  {ub[:,1].tolist()},
+            #                  {Means[:,:,k].tolist()},
+            #                  {Lambdas[:,:,k].tolist()},
+            #                  {Omegas[:,:,k].tolist()},
+            #                  {Nus[k].tolist()},
+            #                  {Upsilon.tolist()},
+            #                  {m_star.tolist()},
+            #                  {S_star.tolist()},
+            #                  {len_horizon})         
+            # """)
 
-            # Impose safety constraints
-            u_[:,k] = np.clip(policy[0], a_min=u_lims[0], a_max=u_lims[1]).astype(int)
-            logger.info(u_[:,k])
+            # # Impose safety constraints
+            # u_[:,k] = np.clip(policy[0], a_min=u_lims[0], a_max=u_lims[1]).astype(int)
+            # logger.info(u_[:,k])
 
-            # Update buffer            
-            ub = backshift(ub,u_[:,k])
+            # # Update buffer            
+            # ub = backshift(ub,u_[:,k])
             
 
         # closeAllSerial(goodPorts)
@@ -214,6 +224,6 @@ if __name__ == '__main__':
     except Exception as e:
         logger.info("Exception")
         logger.info(e)
-        # closeAllSerial(goodPorts)
+        closeAllSerial(goodPorts)
         os._exit(0)
 
