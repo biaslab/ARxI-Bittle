@@ -115,8 +115,6 @@ function infer_params(new_y,
         options = (limit_stack_depth = 100,),
     )
 
-    @info "Completed infer_params"
-
     return params(res.posteriors[:Θ])
 end
 
@@ -149,8 +147,6 @@ function infer_actions(ybuffer1,
         q(u_) = vague(MvNormalMeanCovariance,Du)
     end
 
-    @info "defined initialization"
-
     cons = @constraints begin
         q(y_,u_,Θ) = q(y_)q(u_)q(Θ)
         q(y_) = q(y_[begin])..q(y_[end])
@@ -160,13 +156,13 @@ function infer_actions(ybuffer1,
 
     res = infer(
         model = planning(M_k         = M_k,
-                        Λ_k         = Λ_k,
-                        Ω_k         = Ω_k,
-                        ν_k         = ν_k,
-                        Υ           = Υ,
-                        m_star      = m_star, 
-                        S_star      = S_star,
-                        len_horizon = len_horizon,),
+                         Λ_k         = Λ_k,
+                         Ω_k         = Ω_k,
+                         ν_k         = ν_k,
+                         Υ           = Υ,
+                         m_star      = m_star, 
+                         S_star      = S_star,
+                         len_horizon = len_horizon,),
         data = (y_tmin1 = ybuffer1,
                 y_tmin2 = ybuffer2,
                 u_tmin1 = ubuffer1,

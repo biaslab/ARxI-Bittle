@@ -8,13 +8,42 @@ import datetime as dtime
 import numpy as np
 import numpy.random as rnd
 import timeit
+import logging
 from scipy.stats import multivariate_normal
-from scipy.linalg import inv, det, solve, cho_factor, cho_solve
-from scipy.optimize import minimize
-
+from scipy.linalg import inv
 from julia import Julia
 jl = Julia(compiled_modules=False)
 jl.eval("include(\"ARxI/live.jl\")")
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+
+def proj2psd(A, epsilon=1e-8):
+    """
+    Project a matrix A to the nearest symmetric positive definite matrix.
+
+    Parameters:
+    A (numpy.ndarray): Input matrix.
+    epsilon (float): Small positive value to ensure positive definiteness.
+
+    Returns:
+    numpy.ndarray: Symmetric positive definite matrix.
+    """
+    # Symmetrize the matrix
+    A_sym = (A + A.T) / 2
+
+    # Compute eigenvalues and eigenvectors
+    eigenvalues, eigenvectors = np.linalg.eigh(A_sym)
+
+    # Ensure positive definiteness by clipping eigenvalues
+    eigenvalues = np.maximum(eigenvalues, epsilon)
+
+    # Reconstruct the matrix
+    A_projected = eigenvectors @ np.diag(eigenvalues) @ eigenvectors.T
+
+    return A_projected
 
 def acc2pos(acc, prev_state, dt=1.0, reg=1e-3):
     "Kalman filter for accelerometer integration"
@@ -55,22 +84,13 @@ def acc2pos(acc, prev_state, dt=1.0, reg=1e-3):
     state_pred_S = A @ prev_state.cov @ A.T + Q
 
     # Correction step
-    Is = C @ state_pred_S @ C.T + R  # Innovation covariance (S)
-    # Numerically stable Kalman gain computation avoiding explicit matrix inverse.
-    # K = P H^T S^{-1}. Prefer Cholesky factorization since S should be symmetric positive definite.
-    try:
-        cF = cho_factor(Is, overwrite_a=False, check_finite=False)
-        # cho_solve(cF, I) yields S^{-1} without forming an explicit inverse via Gaussian elimination.
-        Sinv = cho_solve(cF, np.eye(Is.shape[0]))
-        Kg = state_pred_S @ C.T @ Sinv
-    except np.linalg.LinAlgError:
-        # Fallback: solve linear system S^T Z = (P H^T)^T, then K = Z^T
-        PHT = state_pred_S @ C.T
-        Kg = solve(Is, PHT.T, assume_a='pos', check_finite=False).T
+    Is = C @ state_pred_S @ C.T + R  
+    Kg = state_pred_S @ C.T @ inv(Is)
     state_m = state_pred_m + Kg @ (acc - C @ state_pred_m)
-    state_S = (np.eye(9) - Kg @ C) @ state_pred_S + reg*np.eye(9)
+    state_S = (np.eye(9) - Kg @ C) @ state_pred_S @ (np.eye(9) - Kg @ C).T + Kg @ R @ Kg.T + reg*np.eye(9) # Joseph form
+    state_S = proj2psd(state_S, epsilon=1e-6)
 
-    return multivariate_normal(state_m,state_S)
+    return multivariate_normal(state_m,state_S, allow_singular=True)
 
 def backshift(B,v):
     B[:,:-1] = B[:,1:]
@@ -80,7 +100,7 @@ def backshift(B,v):
 if __name__ == '__main__':
 
     # Time
-    len_trial = 50
+    len_trial = 100
     len_horizon = 3;
     now = dtime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
 
@@ -93,14 +113,14 @@ if __name__ == '__main__':
 
     # Prior parameters
     Nu0     = 100.
-    Omega0  = 1e0*np.diag(np.ones(Dy))
-    Lambda0 = 1e-3*np.diag(np.ones(Dx))
-    Mean0   = 1e-8*rnd.randn(Dx,Dy)
-    Upsilon = 1e-4*np.diag(np.ones(Du))
+    Omega0  = 1e-1*np.diag(np.ones(Dy))
+    Lambda0 = 1e-4*np.diag(np.ones(Dx))
+    Mean0   = 1e-12*rnd.randn(Dx,Dy)
+    Upsilon = 1e-12*np.diag(np.ones(Du))
 
     # Setpoint (desired observation)
-    m_star = np.array([0.0, -10., 0.0, 0.0, 0.0, 0.0]) # [yaw, pitch, roll, p_x, p_y, p_z]
-    v_star = np.array([1e0, 1e-5, 1e0, 1e3, 1e3, 1e3])
+    m_star = np.array([0.0, -10., 0.0, 10.0, 0.0, 0.0]) # [yaw, pitch, roll, p_x, p_y, p_z]
+    v_star = np.array([1e0, 1e-5, 1e0, 1e-5, 1e3, 1e3])
     S_star = np.diag(v_star)
     goal   = multivariate_normal(m_star, S_star)
 
@@ -123,11 +143,6 @@ if __name__ == '__main__':
 
     yb = np.zeros((Dy,My))
     ub = np.zeros((Du,Mu+1))
-
-    # Test controls
-    pos0 = np.zeros(16)
-    pos1 = np.array([8, 0, 12, 0, 9, 0, 13, 0, 11, 0, 15, 0, 10, 0, 14, 0])
-    u_   = np.tile(np.column_stack((pos0,pos1)), (1,round(len_trial/2)))
 
     IMUstate = multivariate_normal(np.zeros((9)),np.eye(9))
 
@@ -161,11 +176,13 @@ if __name__ == '__main__':
             # Read IMU
             ypracc = send(goodPorts, ['v', 0])
             ypracc = np.array(ypracc[1].split()[-6:],dtype='float64')
-            IMUstate = acc2pos(ypracc[-3:]/1e3, IMUstate, dt=dt, reg=np.maximum(1e-3,10*dt))
+            dt = np.minimum(1.0,dt)
+            IMUstate = acc2pos(ypracc[-3:]/1e3, IMUstate, dt=dt, reg=dt)
             y_[:,k] = np.concatenate([ypracc[:3],IMUstate.mean[:3]])
                     
             "Update parameters"
 
+            logger.info("Updating parameters..")
             params = jl.eval(f"""
                 infer_params({y_[:,k].tolist()},
                              {yb[:,0].tolist()},
@@ -189,31 +206,35 @@ if __name__ == '__main__':
 
             "Plan actions"
 
-            ##
-            # policy = jl.eval(f"""
-            #    infer_actions({yb[:,0].tolist()},
-            #                  {yb[:,1].tolist()},
-            #                  {ub[:,0].tolist()},
-            #                  {ub[:,1].tolist()},
-            #                  {Means[:,:,k].tolist()},
-            #                  {Lambdas[:,:,k].tolist()},
-            #                  {Omegas[:,:,k].tolist()},
-            #                  {Nus[k].tolist()},
-            #                  {Upsilon.tolist()},
-            #                  {m_star.tolist()},
-            #                  {S_star.tolist()},
-            #                  {len_horizon})         
-            # """)
+            logger.info("Planning..")
+            policy = jl.eval(f"""
+               infer_actions({yb[:,0].tolist()},
+                             {yb[:,1].tolist()},
+                             {ub[:,0].tolist()},
+                             {ub[:,1].tolist()},
+                             {Means[:,:,k].tolist()},
+                             {Lambdas[:,:,k].tolist()},
+                             {Omegas[:,:,k].tolist()},
+                             {Nus[k].tolist()},
+                             {Upsilon.tolist()},
+                             {m_star.tolist()},
+                             {S_star.tolist()},
+                             {len_horizon})         
+            """)
 
-            # # Impose safety constraints
-            # u_[:,k] = np.clip(policy[0], a_min=u_lims[0], a_max=u_lims[1]).astype(int)
-            # logger.info(u_[:,k])
+            if k <= 1:
+                u_[:,k] = rnd.random(Du)
+            else:
+                # Impose safety constraints
+                u_[:,k] = np.clip(policy[0], a_min=u_lims[0], a_max=u_lims[1]).astype(int)
+            
+            logger.info(u_[:,k])
 
-            # # Update buffer            
-            # ub = backshift(ub,u_[:,k])
+            # Update buffer            
+            ub = backshift(ub,u_[:,k])
             
 
-        # closeAllSerial(goodPorts)
+        closeAllSerial(goodPorts)
         logger.info("Ports closed.")
 
         print("Saving results..")
