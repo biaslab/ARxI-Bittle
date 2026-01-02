@@ -5,7 +5,6 @@ using Distributions
 using Optim
 using ForwardDiff
 using RxInfer
-import GraphPPL: interfaces
 
 includet("src/util.jl");
 includet("distributions/matrix_normal_wishart.jl");
