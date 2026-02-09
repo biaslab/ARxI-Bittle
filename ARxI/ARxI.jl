@@ -1,23 +1,25 @@
-using Revise
-using Logging; Logging.LogLevel(-1000)
+module ARxI
+
 using LinearAlgebra
 using Distributions
 using Optim
 using ForwardDiff
 using RxInfer
+import GraphPPL: interfaces
 
-includet("src/util.jl");
-includet("distributions/matrix_normal_wishart.jl");
-includet("distributions/unboltzmann.jl");
-includet("distributions/mv_location_scale_t.jl");
-includet("nodes/MARX.jl");
-includet("nodes/matrix_normal_wishart.jl");
-includet("rules/MARX/in.jl");
-includet("rules/MARX/out.jl");
-includet("rules/MARX/parameter.jl");
-includet("rules/matrix_normal_wishart/out.jl")
+include("src/util.jl");
+include("distributions/matrix_normal_wishart.jl");
+include("distributions/unboltzmann.jl");
+include("distributions/mv_location_scale_t.jl");
+include("nodes/MARX.jl");
+include("nodes/matrix_normal_wishart.jl");
+include("rules/MARX/in.jl");
+include("rules/MARX/out.jl");
+include("rules/MARX/parameter.jl");
+include("rules/matrix_normal_wishart/out.jl")
 
 
+export infer_params, infer_actions, logevidence, mutualinfo, crossentropy, backshift
 
 @model function learning(y_k,y_kmin1,y_kmin2,u_k,u_kmin1,u_kmin2, M_kmin1,Λ_kmin1,Ω_kmin1,ν_kmin1)
 
@@ -85,20 +87,12 @@ Dx = My*Dy + (Mu+1)*Du
 global u_lims = (-20.0, 20.0)
 
 function infer_params(new_y,
-                      ybuffer1,
-                      ybuffer2,
-                      ubuffer1,
-                      ubuffer2,
-                      ubuffer3,
+                      ybuffer,
+                      ubuffer,
                       M_kmin1,
                       Λ_kmin1,
                       Ω_kmin1,
                       ν_kmin1)
-
-    Ω_kmin1 = cat(Ω_kmin1...,dims=2)
-    Λ_kmin1 = cat(Λ_kmin1...,dims=2)
-    M_kmin1 = cat(M_kmin1...,dims=2)
-    M_kmin1 = Matrix(M_kmin1')
 
     res = infer(
         model = learning(M_kmin1 = M_kmin1,
@@ -106,21 +100,19 @@ function infer_params(new_y,
                          Ω_kmin1 = Ω_kmin1,
                          ν_kmin1 = ν_kmin1,),
         data    = (y_k = new_y,
-                   y_kmin1 = ybuffer1,
-                   y_kmin2 = ybuffer2,
-                   u_k     = ubuffer1,
-                   u_kmin1 = ubuffer2,
-                   u_kmin2 = ubuffer3,),
+                   y_kmin1 = ybuffer[:,1],
+                   y_kmin2 = ybuffer[:,2],
+                   u_k     = ubuffer[:,1],
+                   u_kmin1 = ubuffer[:,2],
+                   u_kmin2 = ubuffer[:,3],),
         options = (limit_stack_depth = 100,),
     )
 
     return params(res.posteriors[:Θ])
 end
 
-function infer_actions(ybuffer1,
-                       ybuffer2, 
-                       ubuffer1,
-                       ubuffer2,
+function infer_actions(ybuffer, 
+                       ubuffer,
                        M_k,
                        Λ_k,
                        Ω_k,
@@ -130,15 +122,6 @@ function infer_actions(ybuffer1,
                        S_star, 
                        len_horizon;
                        num_iters=10)
-
-    # Reconstruct matrices passed from Python nested lists
-    S_star = cat(S_star...,dims=2)                      
-    Υ      = cat(Υ...,dims=2)
-    Ω_k    = cat(Ω_k...,dims=2)
-    Λ_k    = cat(Λ_k...,dims=2)
-    M_k    = cat(M_k...,dims=2)
-    M_k    = Matrix(M_k')
-    ν_k    = convert(Float64,ν_k)
 
     inits = @initialization begin
         q(Θ)  = MatrixNormalWishart(M_k,Λ_k,Ω_k,ν_k)
@@ -162,10 +145,10 @@ function infer_actions(ybuffer1,
                          m_star      = m_star, 
                          S_star      = S_star,
                          len_horizon = len_horizon,),
-        data = (y_tmin1 = ybuffer1,
-                y_tmin2 = ybuffer2,
-                u_tmin1 = ubuffer1,
-                u_tmin2 = ubuffer2,),
+        data = (y_tmin1 = ybuffer[:,1],
+                y_tmin2 = ybuffer[:,2],
+                u_tmin1 = ubuffer[:,1],
+                u_tmin2 = ubuffer[:,2],),
         initialization  = inits,
         constraints     = cons,
         iterations      = num_iters, 
@@ -176,3 +159,4 @@ function infer_actions(ybuffer1,
     return mode.(res.posteriors[:u_])
 end
 
+end

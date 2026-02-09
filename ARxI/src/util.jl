@@ -20,12 +20,12 @@ function backshift(x::AbstractVector, a::Number)
     return S*x + e*a
 end
 
-function backshift(M::AbstractMatrix, a::Number)
-    return diagm(backshift(diag(M), a))
+function backshift(M::AbstractMatrix, n::Number)
+    return diagm(backshift(diag(M), n))
 end
 
-function backshift(x::AbstractMatrix, a::Vector)
-    return [a x[:,1:end-1]]
+function backshift(M::AbstractMatrix, v::Vector)
+    return [v M[:,1:end-1]]
 end
 
 function proj2psd(S::AbstractMatrix)
