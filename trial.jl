@@ -5,9 +5,10 @@ using Dates
 using Random
 using JLD2
 using Printf
+using Logging
 
 includet("ARxI/ARxI.jl"); using .ARxI
-includet("Bittle/Bittle.jl"); using .Bittle
+# includet("Bittle/Bittle.jl"); using .Bittle
 
 
 # Time
@@ -57,15 +58,32 @@ ub = zeros(Du,order_u+1)
 
 IMUstate = MvNormal(zeros(9), I(9))
 
-# Placeholder for serial communication
-ports = Bittle.list_available_ports()
-bport = Bittle.BittleSerial(ports[1],115200,0.0)
-if Bittle.open_port(bport)
-    println("Connected")
-end
-good_ports = Dict(bport => true)
-Bittle.send_task(good_ports, bport, ['I', [8, 0, 12, 0, 9, 0, 13, 0, 11, 0, 15, 0, 10, 0, 14, 0], 0.0])
-response = Bittle.send_task(good_ports, bport, ['v', 0])
+port = PetoiBittle.find_bittle_port()
+@info "Using port $(port) to connect to PetoiBittle"
+connection = PetoiBittle.connect(port)
+@info "Sleeping for 5 seconds to let the Petoi Bittle initialize"
+sleep(5)
+
+task = PetoiBittle.MoveJoints(
+    (id = 8,  angle = 0),
+    (id = 12, angle = 0),
+    (id = 9,  angle = 0),
+    (id = 13, angle = 0),
+    (id = 11, angle = 0),
+    (id = 15, angle = 0),
+    (id = 10, angle = 0),
+    (id = 14, angle = 0)
+)
+PetoiBittle.send_command(connection, task)
+
+# ports = Bittle.list_available_ports()
+# bport = Bittle.BittleSerial(ports[1],115200,0.0)
+# if Bittle.open_port(bport)
+#     println("Connected")
+# end
+# good_ports = Dict(bport => true)
+# Bittle.send_task(good_ports, bport, ['I', [8, 0, 12, 0, 9, 0, 13, 0, 11, 0, 15, 0, 10, 0, 14, 0], 0.0])
+# response = Bittle.send_task(good_ports, bport, ['v', 0])
 
 try
     
@@ -77,20 +95,22 @@ try
         @info "tstep = $k/$len_trial, time = $(times[k])"
 
         # Interact with environment
-        actions = [ 8, Int(round(u_[1, k-1])), 
-                   12, Int(round(u_[2, k-1])), 
-                    9, Int(round(u_[3, k-1])),
-                   13, Int(round(u_[4, k-1])), 
-                   11, Int(round(u_[5, k-1])), 
-                   15, Int(round(u_[6, k-1])),
-                   10, Int(round(u_[7, k-1])), 
-                   14, Int(round(u_[8, k-1]))]
-        Bittle.send_task(good_ports, bport, ['I', actions, 0.0])
+        task = PetoiBittle.MoveJoints(
+            (id= 8, angle=Int(round(u_[1, k-1]))),
+            (id=12, angle=Int(round(u_[2, k-1]))),
+            (id= 9, angle=Int(round(u_[3, k-1]))),
+            (id=13, angle=Int(round(u_[4, k-1]))),
+            (id=11, angle=Int(round(u_[5, k-1]))),
+            (id=15, angle=Int(round(u_[6, k-1]))),
+            (id=10, angle=Int(round(u_[7, k-1]))),
+            (id=14, angle=Int(round(u_[8, k-1]))),)
+        PetoiBittle.send_command(connection, task)
 
         # Read IMU (placeholder)
-        response = Bittle.send_task(good_ports, bport, ['v', 0])
-        ypracc = Bittle.parse_token_v(response)
-        # ypracc = parse.(Float64, split(ypracc[2])[end-5:end])
+        ypracc = PetoiBittle.send_command(connection, PetoiBittle.GyroStats())
+        # response = Bittle.send_task(good_ports, bport, ['v', 0])
+        # ypracc = Bittle.parse_token_v(response)
+        # # ypracc = parse.(Float64, split(ypracc[2])[end-5:end])
         dt = min(1.0, dt)
         IMUstate = acc2pos(ypracc[end-2:end] / 1e3, IMUstate, dt=dt, reg=dt)
         y_[:, k] = vcat(ypracc[1:3], IMUstate.μ[1:3])
@@ -133,7 +153,7 @@ try
         ub = backshift(ub, u_[:, k])
     end
 
-    Bittle.close_port(bport)
+    PetoiBittle.disconnect(connection)
     @info "Ports closed."
 
     println("Saving results..")
@@ -146,6 +166,6 @@ catch e
     @info "Exception"
     @info e
     @info catch_backtrace()         
-    Bittle.close_port(bport)
+    PetoiBittle.disconnect(connection)
     exit(0)
 end
